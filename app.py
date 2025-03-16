@@ -3,6 +3,7 @@ import yt_dlp
 import os
 import uuid
 import base64
+import tempfile
 from pathlib import Path
 
 st.set_page_config(
@@ -51,12 +52,17 @@ st.markdown("<p class='subtitle'>Download YouTube videos and audio in different 
 TEMP_DIR = Path("temp_downloads")
 TEMP_DIR.mkdir(exist_ok=True)
 
-def get_video_info(url):
+def get_video_info(url, cookie_file=None):
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'ignoreerrors': True,
     }
+    
+    # Add cookies if provided
+    if cookie_file:
+        ydl_opts['cookiefile'] = cookie_file
+    
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -73,7 +79,7 @@ def get_download_link(file_path, link_text):
     href = f'<a href="data:file/octet-stream;base64,{b64}" download="{file_name}" class="download-btn">{link_text}</a>'
     return href
 
-def download_video(url, format_id, output_path):
+def download_video(url, format_id, output_path, cookie_file=None):
     ydl_opts = {
         'format': format_id,
         'outtmpl': output_path,
@@ -81,6 +87,11 @@ def download_video(url, format_id, output_path):
         'no_warnings': True,
         'ignoreerrors': True,
     }
+    
+    # Add cookies if provided
+    if cookie_file:
+        ydl_opts['cookiefile'] = cookie_file
+    
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
@@ -89,7 +100,7 @@ def download_video(url, format_id, output_path):
         st.error(f"Error downloading video: {str(e)}")
         return False
 
-def download_audio(url, output_path):
+def download_audio(url, output_path, cookie_file=None):
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': output_path,
@@ -102,6 +113,11 @@ def download_audio(url, output_path):
         'no_warnings': True,
         'ignoreerrors': True,
     }
+    
+    # Add cookies if provided
+    if cookie_file:
+        ydl_opts['cookiefile'] = cookie_file
+    
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
@@ -157,12 +173,37 @@ def get_video_formats(info):
     formats.sort(key=lambda x: x['resolution'], reverse=True)
     return formats
 
+# Add sidebar for authentication
+st.sidebar.title("Authentication")
+st.sidebar.markdown("### YouTube Authentication")
+st.sidebar.markdown("""
+To bypass YouTube's bot detection, you can provide a cookies file from your logged-in YouTube session.
+""")
+
+cookie_file = st.sidebar.file_uploader("Upload YouTube cookies file (optional)", type=["txt"])
+cookie_path = None
+
+# Save uploaded cookies to a temporary file if provided
+if cookie_file is not None:
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.txt') as tmp_file:
+        tmp_file.write(cookie_file.getvalue())
+        cookie_path = tmp_file.name
+    st.sidebar.success("Cookies file uploaded!")
+
+st.sidebar.markdown("""
+#### How to get YouTube cookies:
+1. Install the "Get cookies.txt" browser extension
+2. Log in to YouTube in your browser
+3. Use the extension to export cookies for youtube.com
+4. Upload the file here
+""")
+
 # URL input
 url = st.text_input("Enter YouTube URL:", placeholder="https://www.youtube.com/watch?v=...")
 
 if url:
     with st.spinner("Fetching video information..."):
-        info = get_video_info(url)
+        info = get_video_info(url, cookie_path)
     
     if info:
         col1, col2 = st.columns([1, 2])
@@ -203,12 +244,14 @@ if url:
                     output_path = str(TEMP_DIR / f"{safe_title}_{file_uuid}.{extension}")
                     
                     with st.spinner("Downloading video..."):
-                        if download_video(url, selected_format_id, output_path):
+                        if download_video(url, selected_format_id, output_path, cookie_path):
                             st.success("Download complete!")
                             st.markdown(get_download_link(output_path, "Download Video"), unsafe_allow_html=True)
                             st.info("Note: The download link will expire after you close this app or refresh the page.")
+                        else:
+                            st.error("Download failed. Try uploading YouTube cookies or using a different video URL.")
             else:
-                st.warning("No video formats available for this URL.")
+                st.warning("No video formats available for this URL. This may be due to YouTube's restrictions. Try uploading a cookies file.")
         
         else:  # Audio (MP3)
             if st.button("Download MP3"):
@@ -218,12 +261,18 @@ if url:
                 output_path = str(TEMP_DIR / f"{safe_title}_{file_uuid}.%(ext)s")
                 
                 with st.spinner("Converting and downloading audio..."):
-                    if download_audio(url, output_path):
+                    if download_audio(url, output_path, cookie_path):
                         # Find the created MP3 file (extension was added by yt-dlp)
-                        mp3_path = list(TEMP_DIR.glob(f"{safe_title}_{file_uuid}*.mp3"))[0]
-                        st.success("Download complete!")
-                        st.markdown(get_download_link(str(mp3_path), "Download MP3"), unsafe_allow_html=True)
-                        st.info("Note: The download link will expire after you close this app or refresh the page.")
+                        mp3_files = list(TEMP_DIR.glob(f"{safe_title}_{file_uuid}*.mp3"))
+                        if mp3_files:
+                            mp3_path = mp3_files[0]
+                            st.success("Download complete!")
+                            st.markdown(get_download_link(str(mp3_path), "Download MP3"), unsafe_allow_html=True)
+                            st.info("Note: The download link will expire after you close this app or refresh the page.")
+                        else:
+                            st.error("MP3 file not found after processing. This may be due to conversion errors.")
+                    else:
+                        st.error("Download failed. Try uploading YouTube cookies or using a different video URL.")
     else:
         st.error("Could not fetch video information. Please check the URL and try again.")
 
@@ -233,9 +282,17 @@ st.markdown("Built with ❤️ using Streamlit and yt-dlp")
 
 # Delete temporary files when the app is closed
 def delete_temp_files():
+    # Delete downloaded files
     for file in TEMP_DIR.glob("*"):
         try:
             file.unlink()
+        except:
+            pass
+    
+    # Delete temporary cookie file if it exists
+    if cookie_path and os.path.exists(cookie_path):
+        try:
+            os.unlink(cookie_path)
         except:
             pass
 
